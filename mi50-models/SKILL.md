@@ -75,18 +75,75 @@ curl http://<IP>:8213/v1/audio/speech -H "Authorization: Bearer <YOUR_API_KEY>" 
 - 可选 `speaker_file`（wav/mp3 路径）做零样本音色克隆
 - 性能：合成 0.73×实时 + 每次调用 ~8s 模型加载；同一时刻只跑一个请求（单飞锁）
 
-## 6. 轻量生图 — Z-Image-Turbo（http://<IP>:8301 ComfyUI，LLM 在线时可用）
+## 6. 轻量生图 — Z-Image-Turbo（ComfyUI REST API，LLM 在线时可用）
 
-命令行（推荐，约 80s/张 1024²）：
+Skill / Agent 优先通过 HTTP API 远程调用，无需登录服务器运行 Python 脚本。
+服务地址为 `http://<IP>:8301`，所有请求携带 Bearer key；从运行环境读取配置，不把实际密钥写入 skill 或提交到仓库。
 
 ```bash
-/root/GenPic/venv/bin/python /root/GenPic/generate_zimage.py \
-  --prompt "一只戴宇航员头盔的橘猫，电影感" --width 1024 --height 1024 \
-  --out /root/GenPic/samples/x.png        # --seed --steps(默认8) 可选
+export MI50_API_BASE="http://<IP>:8301"
+export MI50_API_KEY="<YOUR_API_KEY>"
 ```
 
-网页：打开 **:8301**（不是 8300）→ 侧边栏 Workflows → Z-Image-Turbo → Queue Prompt。
-REST：ComfyUI 原生 API（/prompt 提交 + /history/{id} 轮询），generate_zimage.py 里有完整可复用构造。
+### 准备可复用的 API 工作流
+
+首次配置时，在 **:8301** 打开 Workflows → Z-Image-Turbo，导出 **Save (API Format)**，
+将节点图保存为 `zimage_workflow_api.json`。后续调用复用该文件，不必每次打开网页。
+已有服务器脚本 `/root/GenPic/generate_zimage.py` 中的工作流构造也可作为参考。
+
+根据导出文件中的节点类型和 `inputs` 修改提示词、宽高、步数及 seed；默认参考为
+1024×1024、8 步。节点 ID 和模型文件名以实际工作流为准，不要猜测或写死其他实例的 ID。
+必须使用 API 格式节点图，不能直接提交包含 `nodes` / `links` 的网页编辑器格式。
+
+```bash
+# 将 API 节点图包装为 /prompt 的请求体
+jq '{prompt: .}' zimage_workflow_api.json > zimage_request.json
+```
+
+### 提交任务
+
+```bash
+curl -fsS "$MI50_API_BASE/prompt" \
+  -H "Authorization: Bearer $MI50_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data-binary @zimage_request.json -o zimage_submit.json
+
+PROMPT_ID=$(jq -er '.prompt_id' zimage_submit.json)
+```
+
+请求外层结构为 `{"prompt": { ...API 格式 workflow 节点... }}`。
+保存返回的 `prompt_id`，用于查询同一任务。若提交失败或缺少 `prompt_id`，
+检查 HTTP 错误、`error` / `node_errors`，修正工作流后再提交。
+
+### 查询进度并下载结果
+
+```bash
+curl -fsS "$MI50_API_BASE/history/$PROMPT_ID" \
+  -H "Authorization: Bearer $MI50_API_KEY" -o zimage_history.json
+```
+
+每隔 2–5 秒查询一次，设置可配置的整体超时（例如 10 分钟，排队或冷启动时可延长）。
+空历史记录表示任务尚未写入历史，不能据此判定失败；检查该 `prompt_id` 的
+`status` 和 `outputs`，执行失败时报告错误，成功后读取各输出节点的 `images`。
+超时后保留 `prompt_id` 供继续查询，避免重复提交同一请求。
+
+每张图片提供 `filename`、`subfolder` 和 `type`，使用这些字段下载：
+
+```bash
+curl -fsS -G "$MI50_API_BASE/view" \
+  -H "Authorization: Bearer $MI50_API_KEY" \
+  --data-urlencode "filename=<images中的filename>" \
+  --data-urlencode "subfolder=<images中的subfolder>" \
+  --data-urlencode "type=<images中的type>" \
+  -o zimage.png
+```
+
+遍历所有输出节点中的图片，保存到调用端的输出目录，再向用户展示图片或文件链接。
+下载参数必须来自任务结果；不要把服务器输出路径当作本地路径。
+
+1024² 图片约 80 秒（参考生成耗时，不含排队或冷启动）。Z-Image 可与 LLM 共存；
+若服务未启动，在服务器运行 `/root/GenPic/ai-switch.sh zimage`。
+网页仍可在 **:8301** → Workflows → Z-Image-Turbo → Queue Prompt 使用。
 
 ## 7. 高质量生图 — Qwen-Image-2.1（http://<IP>:8300，需切档独占 GPU）
 
