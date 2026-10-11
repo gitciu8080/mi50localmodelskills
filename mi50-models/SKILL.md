@@ -1,6 +1,6 @@
 ---
 name: mi50-models
-description: MI50 服务器上全部模型的使用方法手册。要调用对话 LLM、看图/视觉理解、Embedding 向量、Rerank 重排、ASR 语音转文字、TTS 文字转语音、生图（Z-Image 轻量 / QwenImage 高质量）、RAG 检索链路、语音对话链路，或写对接这些模型的代码时使用。用户提到 8200/8210/8211/8212/8213/8300/8301 端口、写调用示例、对接 Open WebUI 等客户端时触发。
+description: MI50 服务器上全部模型的使用方法手册。要调用对话 LLM（qwen36 :8200 / Strata 125B :8201）、看图/视觉理解、Embedding 向量、Rerank 重排、ASR 语音转文字、TTS 文字转语音、生图（Z-Image 轻量 / QwenImage 高质量）、RAG 检索链路、语音对话链路，或写对接这些模型的代码时使用。用户提到 8200/8201/8210/8211/8212/8213/8300/8301 端口、写调用示例、对接 Open WebUI 等客户端时触发。
 ---
 
 # MI50 模型使用手册
@@ -31,7 +31,27 @@ curl http://<IP>:8200/v1/chat/completions -H "Authorization: Bearer <YOUR_API_KE
 
 注意：思考型模型，短回复时内容可能先出现在 `reasoning_content` 字段。
 
-## 2. Embedding — http://<IP>:8210（Qwen3-Embedding-0.6B，1024 维）
+## 2. 对话 LLM（超长上下文）— http://<IP>:8201（Strata · Qwen3.8-Flash-Next 125B-A3B）
+
+- **256K 上下文**（262144 token）+ 全量 KV 常驻显存；同会话追问走前缀缓存（24 万 token 前缀复用 <1s）
+- 端点：`/v1/chat/completions`（OpenAI）、`/v1/messages`（Anthropic 兼容）、`/v1/models`；支持视觉
+  （OpenAI 同款 image_url 格式，图片 ~300 token，走 CPU 编码 ~3s）；网页聊天直接开 `:8201/`
+- 速度：短 prompt 解码 ~30-40 t/s；24 万 token 文档 prefill ~279 t/s（14 分钟读完不衰减）
+- MTP 投机解码默认开：散文类无收益（接受率 ~55%），强规律文本（代码/数字/长文档问答）优
+
+```bash
+curl http://<IP>:8201/v1/chat/completions -H "Authorization: Bearer llamacppIsYes" \
+  -H "Content-Type: application/json" -d '{
+    "messages":[{"role":"user","content":"你好"}], "max_tokens":500}'
+```
+
+Anthropic 客户端（Claude Code 等）直接把 `ANTHROPIC_BASE_URL` 指到 `http://<IP>:8201`。
+
+注意：**思考型模型，`max_tokens` 给足**（建议 ≥500）——太小会被思考 token 占满，
+`message.content` 为 `null`、正文在 `reasoning_content` 里。与 :8200 的 35B 互为替代：
+:8201 长文/文档问答更强，:8200 短对话并发（parallel 2）更方便；两档由 `ai-switch.sh` 切换。
+
+## 3. Embedding — http://<IP>:8210（Qwen3-Embedding-0.6B，1024 维）
 
 ```bash
 curl http://<IP>:8210/v1/embeddings -H "Authorization: Bearer <YOUR_API_KEY>" \
@@ -43,7 +63,7 @@ curl http://<IP>:8210/v1/embeddings -H "Authorization: Bearer <YOUR_API_KEY>" \
 "Embedding response is not a JSON object: type=list"。Open WebUI 里引擎选 OpenAI、Base URL 填
 `http://<IP>:8210/v1`。
 
-## 3. Rerank 重排 — http://<IP>:8211（Qwen3-Reranker-0.6B，Jina/Cohere 风格）
+## 4. Rerank 重排 — http://<IP>:8211（Qwen3-Reranker-0.6B，Jina/Cohere 风格）
 
 ```bash
 curl http://<IP>:8211/v1/rerank -H "Authorization: Bearer <YOUR_API_KEY>" \
@@ -53,7 +73,7 @@ curl http://<IP>:8211/v1/rerank -H "Authorization: Bearer <YOUR_API_KEY>" \
 # → {"results":[{"index":0,"relevance_score":0.99},...]}
 ```
 
-## 4. ASR 语音转文字 — http://<IP>:8212（Qwen3-ASR-0.6B，OpenAI 兼容）
+## 5. ASR 语音转文字 — http://<IP>:8212（Qwen3-ASR-0.6B，OpenAI 兼容）
 
 ```bash
 curl http://<IP>:8212/v1/audio/transcriptions -H "Authorization: Bearer <YOUR_API_KEY>" \
@@ -63,7 +83,7 @@ curl http://<IP>:8212/v1/audio/transcriptions -H "Authorization: Bearer <YOUR_AP
 
 multipart 上传，与 OpenAI Whisper 客户端直接兼容；3 秒音频转写约 0.75s。
 
-## 5. TTS 文字转语音 — http://<IP>:8213（Qwen3-TTS-1.7B，OpenAI 风格壳）
+## 6. TTS 文字转语音 — http://<IP>:8213（Qwen3-TTS-1.7B，OpenAI 风格壳）
 
 ```bash
 curl http://<IP>:8213/v1/audio/speech -H "Authorization: Bearer <YOUR_API_KEY>" \
@@ -75,7 +95,7 @@ curl http://<IP>:8213/v1/audio/speech -H "Authorization: Bearer <YOUR_API_KEY>" 
 - 可选 `speaker_file`（wav/mp3 路径）做零样本音色克隆
 - 性能：合成 0.73×实时 + 每次调用 ~8s 模型加载；同一时刻只跑一个请求（单飞锁）
 
-## 6. 轻量生图 — Z-Image-Turbo（ComfyUI REST API，LLM 在线时可用）
+## 7. 轻量生图 — Z-Image-Turbo（ComfyUI REST API，LLM 在线时可用）
 
 Skill / Agent 优先通过 HTTP API 远程调用，无需登录服务器运行 Python 脚本。
 服务地址为 `http://<IP>:8301`，所有请求携带 Bearer key；从运行环境读取配置，不把实际密钥写入 skill 或提交到仓库。
@@ -145,7 +165,7 @@ curl -fsS -G "$MI50_API_BASE/view" \
 若服务未启动，在服务器运行 `/root/GenPic/ai-switch.sh zimage`。
 网页仍可在 **:8301** → Workflows → Z-Image-Turbo → Queue Prompt 使用。
 
-## 7. 高质量生图 — Qwen-Image-2.1（http://<IP>:8300，需切档独占 GPU）
+## 8. 高质量生图 — Qwen-Image-2.1（http://<IP>:8300，需切档独占 GPU）
 
 ```bash
 /root/GenPic/ai-switch.sh image        # 自动停 LLM（CPU 服务不受影响）
@@ -156,19 +176,21 @@ curl -fsS -G "$MI50_API_BASE/view" \
 
 用完 `ai-switch.sh llm36` 切回。两档生图模型都在 /nvme/GenPicModels/，workflow 在 ComfyUI 侧边栏。
 
-## 8. 组合链路
+## 9. 组合链路
 
 **RAG 建库**：文档分块 → :8210 /v1/embeddings 存向量库 → 查询时同端点编码 query →
-向量检索取 top20 → :8211 /v1/rerank 精排取 top3 → 塞进 :8200 的对话 prompt。
+向量检索取 top20 → :8211 /v1/rerank 精排取 top3 → 塞进 :8200 或 :8201（长文档用 256K 的 :8201）的对话 prompt。
 
-**语音对话**：录音 → :8212 转文字 → :8200 对话 → 回复文本 → :8213 合成语音播放。
+**语音对话**：录音 → :8212 转文字 → :8200/:8201 对话 → 回复文本 → :8213 合成语音播放。
 （当前 llama.cpp 无 qwen3omni 架构，一体式 OMNI 不可用，此串联链路即等价实现）
 
 ## 性能/容量速查
 
 | 能力 | 延迟参考 |
 |---|---|
-| LLM 生成 | ~49 t/s |
+| qwen36 生成 | ~49 t/s |
+| Strata 解码（短 prompt / 24 万 token 上下文） | ~30-40 t/s / ~20 t/s |
+| Strata prefill | ~279 t/s（1.5K-24 万 token 同速） |
 | Embedding 512-token 块 | ~0.5-1s |
 | Rerank 20 条候选 | 数秒 |
 | ASR | 0.25×实时 |
