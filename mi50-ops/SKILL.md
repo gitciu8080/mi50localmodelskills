@@ -14,7 +14,7 @@ Strata 0.1.42（gfx906/HIP 自建，125B MoE）、ComfyUI（生图）。59G 内�
 | systemd 单元 | 端口 | 位置 | 内容 |
 |---|---|---|---|
 | `qwen36.service` | :8200 | GPU 26.2G | Qwen3.6-35B-A3B Q4_K_XL，512K ctx（每槽 256K×parallel 2），视觉 mmproj，脚本 /root/Qwen36.sh |
-| `strata.service` | :8201 | GPU 整卡 31.6G + 内存 ~40G | Strata 0.1.42（gfx906/HIP 自建）跑 Qwen3.8-Flash-Next 125B MoE IQ2_XS，**256K ctx，KV q4_0 全量常驻显存（--kv-resident 0 --kv-grow）**，MTP spec4，**多模态（CPU 视觉编码器，发图走 OpenAI image_url）**；配置 /nvme/Strata/strata-iq2_xs.json，引擎日志 /nvme/Strata/strata-iq2_xs.log |
+| `strata.service` | :8201 | GPU 整卡 31.6G + 内存 ~40G | Strata 0.1.44.1（gfx906/HIP 自建，2026-10-15 升级）跑 Qwen3.8-Flash-Next 125B MoE IQ2_XS，**256K ctx，KV q4_0 全量常驻显存（--kv-resident 0 --kv-grow）**，MTP spec4，**多模态（CPU 视觉编码器，发图走 OpenAI image_url）**；配置 /nvme/Strata/strata-iq2_xs.json，引擎日志 /nvme/Strata/strata-iq2_xs.log |
 | `qwen-embed.service` | :8210 | CPU | Qwen3-Embedding-0.6B Q8（/v1/embeddings） |
 | `qwen-rerank.service` | :8211 | CPU | Qwen3-Reranker-0.6B Q8（/v1/rerank） |
 | `qwen-asr.service` | :8212 | CPU | Qwen3-ASR-0.6B Q8 + 音频 mmproj（/v1/audio/transcriptions） |
@@ -82,9 +82,13 @@ curl -s http://127.0.0.1:80/api/services      # 面板的服务状态 API
    （临界 105°C，用户确认不设功耗墙）；同会话追问走前缀缓存（24 万 token 复用 <1s）。
 12. **Strata 的 gfx906 构建链**：源码/构建在 /nvme/Strata（build-906 目录，ROCm 6.3.3 直编，
    `-DSTRATA_HIP_GFX906=ON`，CMAKE_PREFIX_PATH=/opt/rocm）；setup.py 有本地补丁——`STRATA_GFX906=1`
-   时 AMD_ARCHS 才认 gfx906；钉住版 llama.cpp 在 third_party/llama.cpp 免下载（github.com 主站被墙，
-   codeload.github.com 与 hf-mirror.com 可直连；模型下载一律 `HF_ENDPOINT=https://hf-mirror.com`）。
-   升级 = git pull 后手动重编（CMake 参数照 build-906 的 cache），setup 不会替你编 gfx906。
+   时 AMD_ARCHS 才认 gfx906；**CMakeLists.txt 另有两处 LOCAL GFX906 PATCH**（0.1.44 起需要）：
+   `strata_qwen35`（ROCm 7 hipblas 签名）与 `strata_mmq_w4a4`（RTX50 专属、HIP 死代码），
+   用 `if(NOT STRATA_HIP_GFX906)` 跳过——rsync 换源会覆盖 CMakeLists，升级时要重打。
+   钉住版 llama.cpp 在 third_party/llama.cpp 免下载（github.com 主站被墙，codeload.github.com 与
+   hf-mirror.com 可直连；模型下载一律 `HF_ENDPOINT=https://hf-mirror.com`）。
+   升级流程已写入 /root/GenPic/README.md（备份配置→rsync 换源→重打补丁→删 build-906 全新 cmake→
+   重编三件套→重生成 BUILD.json→停服换 engine/→验证）。setup 不会替你编 gfx906。
 13. **Strata 的 MTP 开关**：native IQ 量化包**强制要求 `--spec >= 2`**（引擎拒绝无投机启动），但 MTP
    草稿模型本身可选——删 `--spec-min-p 0.5` 与 `--mtp <path>` 两对参数即退回后缀自投机。
    实测（2026-10-11）：散文类 MTP 接受率仅 52-60%，开着反而慢 ~15%；强规律文本（数字/代码）
